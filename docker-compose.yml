@@ -1,0 +1,234 @@
+version: "3.8"
+# x-logging: &logging
+#   logging:
+#     driver: loki
+#     options:
+#       loki-url: "http://loki:3100/loki/api/v1/push"
+#       loki-retries: "5"
+#       loki-batch-size: "400" 
+#       mode: non-blocking
+x-depending: &logdepens
+    depends_on:
+      - "loki"
+      - "fluent"
+
+x-logging: &loggingotps
+        fluentd-address: localhost:24224
+        fluentd-async-connect: 'true'
+        fluentd-retry-wait: '1s'
+        fluentd-max-retries: '5'
+
+services:
+  traefik:
+    
+    image: "traefik:v2.3"
+    container_name: "traefik"
+    command:
+      #- "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--tracing.jaeger=true"
+      - "--tracing.jaeger.samplingServerURL=http://jaeger:5778/sampling"
+      - "--tracing.jaeger.localAgentHostPort=jaeger:6831"
+      - "--metrics.prometheus=true"
+      - "--accesslog=true"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    labels:
+      - traefik.port=8080
+      - traefik.docker.network=app_net
+    
+    networks:
+      - app_net
+    << : *logdepens
+    logging:
+      driver: "fluentd"
+      options:
+        << : *loggingotps
+        tag: proxy
+
+  website:
+    <<: *logdepens
+    image: nginx
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.website.rule=Host(`website.localhost`)||Host(`localhost`)"
+      - "traefik.http.routers.website.entrypoints=web"
+      - traefik.http.services.website.loadbalancer.server.port=80
+    networks:
+        - app_net
+
+  mongodb:
+    image: mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    labels:
+      - "traefik.enable=true"
+      # The domain the service will respond to
+      - "traefik.http.routers.mongodb.rule=Host(`mongo.localhost`)"
+      # Allow request only from the predefined entry point named "web"
+      - "traefik.http.routers.mongodb.entrypoints=web"
+      - traefik.http.services.mongodb.loadbalancer.server.port=27017
+    <<: *logdepens
+    logging:
+      driver: "fluentd"
+      options:
+        << : *loggingotps
+        tag: mongo
+          
+    networks:
+      - app_net
+
+  express:
+    image: mongo-express
+    labels:
+      - "traefik.enable=true"
+      # The domain the service will respond to
+      - "traefik.http.routers.express.rule=Host(`express.localhost`)"
+      # Allow request only from the predefined entry point named "web"
+      - "traefik.http.routers.express.entrypoints=web"
+      # - traefik.http.services.mongodb.loadbalancer.server.port=8081
+    environment: 
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD: root
+    # ports: 
+      # - "8081:8081"
+    <<: *logdepens
+    logging:
+      driver: "fluentd"
+      options:
+        << : *loggingotps
+        tag: express
+    networks:
+      - app_net
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    labels:
+      - "traefik.enable=true"
+      # The domain the service will respond to
+      - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+      # Allow request only from the predefined entry point named "web"
+      - "traefik.http.routers.grafana.entrypoints=web"
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+    networks:
+      - app_net
+    environment:
+      GF_EXPLORE_ENABLED: "true"
+
+  prometheus:
+    
+    image: prom/prometheus
+    # ports:
+    #   - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--log.format=json"
+    labels:
+      - "traefik.enable=true"
+      # The domain the service will respond to
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.localhost`)"
+      # Allow request only from the predefined entry point named "web"
+      - "traefik.http.routers.prometheus.entrypoints=web"
+      - traefik.http.services.prometheus.loadbalancer.server.port=9090
+    volumes:
+      - ./prometheus/prom_prometheus.yml:/etc/prometheus/prometheus.yml
+    <<: *logdepens
+    logging:
+      driver: "fluentd"
+      options:
+        << : *loggingotps
+        tag: prometheus
+    networks:
+      - app_net
+    depends_on:
+    - cadvisor
+  cadvisor:
+    image: gcr.io/google-containers/cadvisor:latest
+    container_name: cadvisor
+    # ports:
+    # - 8080:8080
+    volumes:
+    - /:/rootfs:ro
+    - /var/run:/var/run:rw
+    - /sys:/sys:ro
+    - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - app_net
+
+  
+
+
+    
+  jaeger:
+
+    image: jaegertracing/all-in-one:1.20
+    environment:
+      COLLECTOR_ZIPKIN_HTTP_PORT: 9411 
+    # ports:
+    #   - "5775:5775/udp" 
+    #   - "6831:6831/udp"
+    #   - "6832:6832/udp" 
+    #   - "5778:5778" 
+    #   - "16686:16686" 
+    #   - "14268:14268" 
+    #   - "14250:14250" 
+    #   - "9411:9411" 
+    labels:
+      - "traefik.enable=true"
+      # The domain the service will respond to
+      - "traefik.http.routers.jaeger.rule=Host(`jaeger.localhost`)"
+      # Allow request only from the predefined entry point named "web"
+      - "traefik.http.routers.jaeger.entrypoints=web"
+      - traefik.http.services.jaeger.loadbalancer.server.port=16686
+    <<: *logdepens
+    logging:
+      driver: "fluentd"
+      options:
+        << : *loggingotps
+        tag: jaeger
+    depends_on:
+      - "loki"
+    networks:
+      - app_net
+
+
+  loki:
+    image:  grafana/loki:2.0.0
+    # ports:
+    #   - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml
+    networks:
+      - app_net
+  fluent:
+    build: fluentd
+    ports:
+      - "24224:24224" 
+      - "24224:24224/udp" 
+    networks:
+      - app_net
+    volumes:
+      - ./fluentd/fluent.conf:/fluentd/etc/fluent.conf
+    #   - /data:/fluentd/log
+networks:
+  app_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: "10.0.0.0/28"
